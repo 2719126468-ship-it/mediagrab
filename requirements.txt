@@ -1,0 +1,9 @@
+# 必需
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+cloudscraper>=1.2.71
+
+# 可选：TLS 指纹伪装（部分站点按指纹拦截）
+# curl_cffi>=0.5.0
+# 可选：浏览器兜底渲染（需另行安装 chromium / chromedriver）
+# selenium>=4.20.0

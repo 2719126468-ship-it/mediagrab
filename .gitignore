@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.part
+*.tmp
+
+# 本地构建脚手架与端到端测试残留（不属于发布内容）
+_build/
+_e2e/
