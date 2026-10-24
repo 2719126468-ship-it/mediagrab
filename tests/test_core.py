@@ -385,7 +385,45 @@ class NovelTests(unittest.TestCase):
         html = app.build_novel_html("书名<script>", [{"title": "第一章", "text": "a\nb"}])
         self.assertIn('id="ch1"', html)
         self.assertIn("&lt;script&gt;", html)
-        self.assertNotIn("<script>", html)
+        # 阅读页自带一段阅读器 JS（唯一的 <script>），书名里的 <script> 必须仍是转义文本
+        self.assertEqual(html.count("<script>"), 1, "标题注入的 script 未转义或出现了多余脚本标签")
+
+    def test_reader_settings_present_in_page(self):
+        html = app.build_novel_html("书名", [{"title": "第一章", "text": "正文"}])
+        for marker in ('class="bar"', "__mg.step", "__mg.theme", 'id="drawer"', "class=\"progress\""):
+            self.assertIn(marker, html, "阅读页缺少阅读设置组件：%s" % marker)
+
+    def test_parse_novel_text_splits_chapters(self):
+        book = app.parse_novel_text("《书名》\n\n第一章 起\n\n甲段\n\n第2章 承\n\n乙段\n", title="书名")
+        self.assertEqual([c["title"] for c in book["chapters"]], ["第一章 起", "第2章 承"])
+        self.assertIn("甲段", book["chapters"][0]["text"])
+        self.assertEqual(book["failed"], 0)
+
+    def test_parse_novel_text_without_headings_single_chapter(self):
+        book = app.parse_novel_text("整篇没有章节标题\n第二行", title="孤本")
+        self.assertEqual(len(book["chapters"]), 1)
+        self.assertEqual(book["chapters"][0]["title"], "孤本")
+
+    def test_parse_novel_text_rejects_empty(self):
+        with self.assertRaises(ValueError):
+            app.parse_novel_text("   \n  ", title="空")
+
+    def test_import_novel_files_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            txt = Path(tmp) / "书.txt"
+            txt.write_text("第一章 甲\n\n正文甲\n\n第二章 乙\n\n正文乙\n", encoding="utf-8")
+            gbk = Path(tmp) / "旧编码.txt"
+            gbk.write_bytes("第一章 丙\n\n正文丙\n".encode("gbk"))
+            missing = Path(tmp) / "不存在.txt"
+            with patch.object(app, "NOVEL_DIR", tmp):
+                results = app.import_novel_files([str(txt), str(gbk), str(missing)])
+                self.assertEqual(results[0]["chapters"], 2)
+                self.assertEqual(results[1]["chapters"], 1, "gbk 编码应自动识别")
+                self.assertIn("error", results[2])
+                shelf = app.list_novel_books()["books"]
+                self.assertEqual({b["name"] for b in shelf}, {"书.html", "旧编码.html"})
+                html = (Path(tmp) / "书.html").read_text(encoding="utf-8")
+                self.assertIn('id="ch2"', html)
 
 
 class WebFrontendTests(unittest.TestCase):

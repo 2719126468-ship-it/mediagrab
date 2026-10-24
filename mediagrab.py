@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qs, quote, unquote, unquote_plus
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ---------------------------------------------------------------- 基础常量
 UA = "Mozilla/5.0 (Linux; Android 10) Chrome/120.0.0.0"
@@ -1807,37 +1807,204 @@ def _novel_safe_name(title):
     return name[:80] or "novel"
 
 
+CHAPTER_LINE_RE = re.compile(
+    r"^\s*(?:第\s*[0-9〇一二三四五六七八九十百千万两零]+\s*[章回节卷]"
+    r"|Chapter\s+\d+|chapter\s+\d+)"
+    r"[^\n]{0,60}$", re.I)
+
+
+def parse_novel_text(text, title=None):
+    """把本地 txt 正文按「第X章」标题行切分成章节结构。
+
+    与 scrape_novel 返回同一形状：{"title", "chapters": [{"title","text"}], "failed": 0}。
+    识别不到任何章节标题时，整篇作为单章（标题用书名或「正文」）。
+    """
+    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # 开头的书名行（《女仆守则》/ 与书名相同的短行）不当正文也不当章节
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        head = line.strip().strip("《》 ")
+        if head == (title or "").strip("《》 ") or (line.strip().startswith("《") and len(head) <= 40):
+            lines = lines[i + 1:]
+        break
+    chapters, current_title, buffer = [], None, []
+
+    def flush():
+        if current_title is None and not any(x.strip() for x in buffer):
+            return
+        body = "\n".join(buffer).strip("\n")
+        chapters.append({"title": current_title or (title or "正文"),
+                         "text": body or "（空章节）"})
+
+    for line in lines:
+        if CHAPTER_LINE_RE.match(line.strip()) and len(line.strip()) <= 80:
+            if current_title is not None or buffer:
+                flush()
+            current_title, buffer = line.strip(), []
+        else:
+            buffer.append(line)
+    flush()
+    if not chapters:
+        raise ValueError("正文为空，无法导入")
+    return {"title": (title or "").strip() or chapters[0]["title"],
+            "chapters": chapters, "failed": 0}
+
+
 def build_novel_html(title, chapters):
-    """把章节拼成单文件深色主题阅读页（带目录锚点，离线可读）。"""
+    """把章节拼成单文件深色主题阅读页（离线可读）。
+
+    1.1 起内置阅读设置栏：字号 / 行距 / 三档主题 / 目录浮窗，偏好与阅读进度写
+    localStorage（按书名隔离），换设备重开能回到上次的章节位置。
+    """
     from html import escape
 
     css = (':root{color-scheme:dark}html{scroll-behavior:smooth}'
-           'body{margin:0;background:#1a1a1a;color:#d4d4d4;line-height:1.8;font-size:18px;'
-           'font-family:-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif}'
-           '.wrap{max-width:720px;margin:0 auto;padding:24px 16px 96px}'
+           'body{margin:0;background:var(--bg,#1a1a1a);color:var(--fg,#d4d4d4);'
+           'line-height:var(--lh,1.8);font-size:var(--fs,18px);'
+           'font-family:-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif;'
+           'transition:background .2s,color .2s}'
+           'body[data-theme="sepia"]{--bg:#f5ecd9;--fg:#4a3f2d}'
+           'body[data-theme="light"]{--bg:#fff;--fg:#222}'
+           '.wrap{max-width:var(--mw,720px);margin:0 auto;padding:24px 16px 96px}'
            'h1{font-size:1.6em;margin:.4em 0 1em;text-align:center}'
-           'h2{font-size:1.25em;margin:2.4em 0 1em;padding-top:.6em;border-top:1px solid #333}'
-           'a{color:#8ab4f8;text-decoration:none}'
-           'nav ol{padding-left:1.8em;margin:0 0 2em}nav li{margin:.25em 0}'
+           'h2{font-size:1.25em;margin:2.4em 0 1em;padding-top:.6em;border-top:1px solid var(--bd,#333)}'
+           'a{color:var(--link,#8ab4f8);text-decoration:none}'
+           'nav#toc{padding-left:1.8em;margin:0 0 2em}nav#toc li{margin:.25em 0}'
            '.chapter p{margin:0 0 .8em;text-indent:2em}'
-           '.top{position:fixed;right:16px;bottom:16px;padding:10px 14px;background:#2d2d2d;'
-           'border:1px solid #444;border-radius:999px;color:#d4d4d4;font-size:14px;opacity:.92}'
+           '.top{position:fixed;right:16px;bottom:16px;padding:10px 14px;background:var(--btn,#2d2d2d);'
+           'border:1px solid var(--bd,#444);border-radius:999px;color:var(--fg,#d4d4d4);font-size:14px;opacity:.92}'
+           '.bar{position:fixed;top:0;left:0;right:0;z-index:9;display:flex;gap:8px;justify-content:center;'
+           'padding:6px 10px;background:var(--barbg,rgba(20,20,20,.92));backdrop-filter:blur(4px);'
+           'border-bottom:1px solid var(--bd,#333);font-size:13px;flex-wrap:wrap}'
+           'body[data-theme="sepia"] .bar,body[data-theme="light"] .bar{background:var(--barbg,rgba(255,250,238,.92))}'
+           '.bar button{background:var(--btn,#2d2d2d);color:var(--fg,#d4d4d4);border:1px solid var(--bd,#444);'
+           'border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px}'
+           '.bar span{align-self:center;color:var(--fg,#888)}'
+           '#drawer{position:fixed;top:0;right:0;bottom:0;width:min(320px,85vw);z-index:10;overflow:auto;'
+           'background:var(--bg,#1a1a1a);border-left:1px solid var(--bd,#333);padding:48px 16px 24px;'
+           'transform:translateX(105%);transition:transform .2s}'
+           '#drawer.open{transform:none}'
+           '#drawer li{margin:.35em 0;font-size:15px}'
+           '.progress{position:fixed;left:0;top:0;height:2px;background:#8ab4f8;z-index:11;transition:width .2s}'
+           '.wrap{padding-top:56px}'
            '@media(max-width:480px){body{font-size:17px}}')
+    reader_js = """
+(function(){var KEY='mg:novel:'+document.title;var S={fs:18,lh:1.8,theme:'dark',pos:0};
+try{Object.assign(S,JSON.parse(localStorage.getItem(KEY)||'{}'));}catch(e){}
+var root=document.documentElement.style;
+function apply(){root.setProperty('--fs',S.fs+'px');root.setProperty('--lh',S.lh);
+document.body.setAttribute('data-theme',S.theme);}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
+apply();
+function step(d){S.fs=Math.min(30,Math.max(13,S.fs+d));apply();save();}
+function lh(d){S.lh=Math.min(3,Math.max(1.3,Math.round((S.lh+d)*10)/10));apply();save();}
+function theme(){var o=['dark','sepia','light'];S.theme=o[(o.indexOf(S.theme)+1)%3];apply();save();}
+var drawer=document.getElementById('drawer');
+function toc(){drawer.classList.toggle('open');}
+var prog=document.querySelector('.progress');
+function track(){var h=document.documentElement;var max=h.scrollHeight-h.clientHeight;
+if(max>0){prog.style.width=(h.scrollTop/max*100)+'%';S.pos=Math.round(h.scrollTop);}}
+var t;window.addEventListener('scroll',function(){track();clearTimeout(t);t=setTimeout(save,800);},{passive:true});
+if(S.pos>40){setTimeout(function(){window.scrollTo(0,S.pos);},50);}
+window.__mg={step:step,lh:lh,theme:theme,toc:toc};})();
+"""
     toc, sections = [], []
     for number, chapter in enumerate(chapters, 1):
         name = escape(chapter["title"])
-        toc.append('<li><a href="#ch%d">%s</a></li>' % (number, name))
+        toc.append('<li><a href="#ch%d" onclick="document.getElementById(\'drawer\').classList.remove(\'open\')">%s</a></li>'
+                   % (number, name))
         paragraphs = "".join("<p>%s</p>" % escape(line)
                              for line in chapter["text"].splitlines() if line.strip())
         sections.append('<div id="ch%d"><h2>%s</h2><div class="chapter">%s</div></div>'
                         % (number, name, paragraphs))
     safe_title = escape(title)
+    bar = ('<div class="bar">'
+           '<button onclick="__mg.step(-1)">A−</button><button onclick="__mg.step(1)">A＋</button>'
+           '<span>|</span>'
+           '<button onclick="__mg.lh(-0.1)">密</button><button onclick="__mg.lh(0.1)">疏</button>'
+           '<span>|</span>'
+           '<button onclick="__mg.theme()">主题</button>'
+           '<button onclick="__mg.toc()">目录</button>'
+           '</div><div class="progress"></div>')
     return ('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<title>' + safe_title + '</title><style>' + css + '</style></head><body>'
-            '<div class="wrap"><h1 id="top">' + safe_title + '</h1><nav><ol>' + "".join(toc)
-            + '</ol></nav>' + "".join(sections) + '</div>'
-            '<a class="top" href="#top">↑ 顶部</a></body></html>')
+            + bar +
+            '<div class="wrap"><h1 id="top">' + safe_title + '</h1>'
+            + '<nav id="toc" hidden><ol>' + "".join(toc) + '</ol></nav>'
+            + '<div id="drawer"><h2>目录</h2><ol>' + "".join(toc) + '</ol></div>'
+            + "".join(sections) + '</div>'
+            '<a class="top" href="#top">↑ 顶部</a>'
+            '<' + 'script>' + reader_js + '</' + 'script></body></html>')
+
+
+def _save_novel_book(book, filename=None):
+    """把 {"title","chapters"} 落成阅读页写入 NOVEL_DIR，返回文件名。"""
+    os.makedirs(NOVEL_DIR, exist_ok=True)
+    name = filename or _novel_safe_name(book["title"]) + ".html"
+    if not name.endswith(".html"):
+        name += ".html"
+    target = os.path.join(NOVEL_DIR, name)
+    with open(target + ".part", "w", encoding="utf-8") as handle:
+        handle.write(build_novel_html(book["title"], book["chapters"]))
+    os.replace(target + ".part", target)
+    return name
+
+
+def import_novel_files(paths):
+    """把本机 .txt 直接建成阅读页（离线写好的书不必走抓取）。
+
+    返回 [{"file", "saved", "chapters", "title"}]；单个文件失败不影响其它。
+    """
+    results = []
+    for raw in paths:
+        path = Path(str(raw).strip())
+        try:
+            if not path.is_file():
+                raise ValueError("文件不存在")
+            data = path.read_bytes()
+            for enc in ("utf-8", "gbk"):
+                try:
+                    text = data.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                text = data.decode("utf-8", "replace")
+            title = path.stem
+            first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+            if not CHAPTER_LINE_RE.match(first):
+                head = re.match(r"^\s*(《[^》]+》|[^\\/:*?\"\u4e00-\u9fff<]{0,30}[\u4e00-\u9fff]{2,30})\s*$", first)
+                if head:
+                    title = first.strip("《》 ")
+            book = parse_novel_text(text, title=title)
+            saved = _save_novel_book(book)
+            results.append({"file": str(path), "saved": saved,
+                            "chapters": len(book["chapters"]), "title": book["title"]})
+        except Exception as exc:
+            results.append({"file": str(path), "error": str(exc)})
+    return results
+
+
+def list_novel_books():
+    """小说书架：NOVEL_DIR 里的阅读页清单（按修改时间倒序）。"""
+    books = []
+    root = Path(NOVEL_DIR)
+    try:
+        children = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".html"]
+    except OSError:
+        children = []
+    for path in children:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        books.append({"name": path.name, "title": path.stem, "size": stat.st_size,
+                      "mtime": stat.st_mtime,
+                      "url": "/api/novel_file?name=" + quote(path.name)})
+    books.sort(key=lambda item: item["mtime"], reverse=True)
+    return {"books": books}
 
 
 def _web_novel_scrape(job_id, url, site, max_chapters):
@@ -1851,12 +2018,7 @@ def _web_novel_scrape(job_id, url, site, max_chapters):
     set_job(status="running", message="正在读取目录…")
     try:
         book = scrape_novel(url, site=site, progress_cb=progress, max_chapters=max_chapters)
-        os.makedirs(NOVEL_DIR, exist_ok=True)
-        name = _novel_safe_name(book["title"]) + ".html"
-        target = os.path.join(NOVEL_DIR, name)
-        with open(target + ".part", "w", encoding="utf-8") as handle:
-            handle.write(build_novel_html(book["title"], book["chapters"]))
-        os.replace(target + ".part", target)
+        name = _save_novel_book(book)
         note = "（%d 章抓取失败）" % book["failed"] if book["failed"] else ""
         set_job(status="done", message="✅ 已保存 %d 章%s：%s"
                  % (len(book["chapters"]), note, name))
@@ -1974,6 +2136,7 @@ button.primary{background:#2563eb;border:0;font-weight:700;cursor:pointer}
 <label class="option"><input id="move" type="checkbox" checked> 同步后删除原文件</label>
 <button onclick="showFavorites()">我的收藏</button>
 <button onclick="showLibrary()">📚 媒体库</button>
+<button onclick="showNovels()">📖 小说书架</button>
 <button onclick="showDomainPool()">🌐 域名池</button>
 <button onclick="showHistory()">📜 历史</button>
 </div></header>
@@ -2154,6 +2317,42 @@ function showGallery(index) {
   if (!gallery) return;
   grid.innerHTML = `<h2 style="grid-column:1/-1">${esc(gallery.name)}</h2>`
     + (gallery.files || []).map((u) => `<div class="card"><div class="thumb"><img src="${u}" loading="lazy" alt=""></div></div>`).join('');
+}
+
+async function showNovels() {
+  const d = await (await apiFetch('/api/novels')).json();
+  const books = d.books || [];
+  grid.innerHTML = (books.length ? books.map((x) => `<article class="card"><div class="body">
+    <div class="title">${esc(x.title)}</div>
+    <div class="meta">${fmtSize(x.size)} · ${new Date(x.mtime * 1000).toLocaleString()}</div>
+    <div class="actions"><span>阅读页</span><button onclick="openNovel('${esc(x.name)}')">打开</button></div>
+    </div></article>`).join('')
+    : '<div class="empty">书架还是空的：把 .txt 放进小说目录，或粘贴 URL 抓取</div>')
+    + '<article class="card"><div class="body"><div class="title">导入本机 txt</div>'
+    + '<div class="meta">一行一个文件路径，生成阅读页进书架</div>'
+    + '<textarea id="impPaths" rows="4" style="width:100%;box-sizing:border-box;background:#111;color:#ddd;border:1px solid #444;border-radius:6px;padding:8px"></textarea>'
+    + '<div class="actions"><button onclick="importNovels()">导入</button><span id="impMsg"></span></div>'
+    + '</div></article>';
+  pager.hidden = true;
+}
+
+function openNovel(name) {
+  window.open('/api/novel_file?name=' + encodeURIComponent(name) + '&token=' + encodeURIComponent(authToken), '_blank');
+}
+
+async function importNovels() {
+  const paths = $('#impPaths').value.split('\n').map((x) => x.trim()).filter(Boolean);
+  if (!paths.length) { $('#impMsg').textContent = '先填路径'; return; }
+  $('#impMsg').textContent = '导入中…';
+  try {
+    const r = await apiFetch('/api/import_novel', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '导入失败');
+    $('#impMsg').textContent = (d.results || []).map((x) => x.error ? ('✗ ' + x.file) : ('✓ ' + x.title + '（' + x.chapters + ' 章）')).join('；');
+    showNovels();
+  } catch (e) { $('#impMsg').textContent = e.message; }
 }
 
 async function showHistory() {
@@ -2340,6 +2539,10 @@ def serve_web(port=8080, no_auth=False):
 
             if parsed.path == "/api/domains":
                 self.send_json(cmd_list_domains(Log("error", True)))
+                return
+
+            if parsed.path == "/api/novels":
+                self.send_json(list_novel_books())
                 return
 
             if parsed.path == "/api/novel_file":
@@ -2569,6 +2772,16 @@ def serve_web(port=8080, no_auth=False):
                     self.send_json({"id": job_id}, 202)
                     return
 
+                if path == "/api/import_novel":
+                    paths = payload.get("paths")
+                    if not isinstance(paths, list) or not paths or not all(
+                            isinstance(x, str) and x.strip() for x in paths):
+                        raise ValueError("paths 需要是非空的文件路径列表")
+                    if len(paths) > 200:
+                        raise ValueError("一次最多导入 200 个文件")
+                    self.send_json({"results": import_novel_files(paths)})
+                    return
+
                 if path == "/api/scrape_novel":
                     novel_url = str(payload.get("url") or "").strip()
                     if not re.match(r"^https?://", novel_url, re.I):
@@ -2630,6 +2843,25 @@ def run(args):
 
     if args.list_domains:
         return EXIT_OK, cmd_list_domains(log)
+
+    if getattr(args, "novel_list", False):
+        books = list_novel_books()["books"]
+        for book in books:
+            log.info("书架：%s（%d 字节）→ %s" % (book["title"], book["size"], book["url"]))
+        if not books:
+            log.info("书架为空；用 --novel-import 导入 .txt，或在 Web UI 抓取")
+        return EXIT_OK, {"books": books}
+
+    if getattr(args, "novel_import", None):
+        results = import_novel_files(args.novel_import)
+        code = EXIT_OK
+        for item in results:
+            if "error" in item:
+                code = EXIT_GENERIC
+                log.error("导入失败 %s：%s" % (item["file"], item["error"]))
+            else:
+                log.info("已导入 %s → %s（%d 章）" % (item["file"], item["saved"], item["chapters"]))
+        return code, {"results": results}
 
     fetcher = Fetcher(log, cookie_file=args.cookies, proxy=args.proxy,
                       use_selenium=args.selenium, selenium_wait=args.selenium_wait)
@@ -2862,6 +3094,10 @@ def build_parser():
                         help="输出目录（默认 %s）" % DEFAULT_OUTDIR)
     parser.add_argument("--domain-pool", help="自定义/覆盖候选域名列表，逗号分隔")
     parser.add_argument("--list-domains", action="store_true", help="查看候选域名池状态后退出")
+    parser.add_argument("--novel-list", action="store_true",
+                        help="列出小说书架（阅读页目录）后退出")
+    parser.add_argument("--novel-import", nargs="+", metavar="TXT",
+                        help="把本机 .txt 章节文本导入书架（自动切分「第X章」并生成阅读页）")
     parser.add_argument("--info", action="store_true", help="仅解析媒体信息，不下载")
     parser.add_argument("--series", action="store_true", help="下载整个系列（若页面结构支持）")
     parser.add_argument("--series-limit", type=int, default=20, help="系列模式最多下载集数（默认 20）")

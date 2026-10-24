@@ -41,7 +41,11 @@
 
 **小说**
 - CSS 选择器配置化：编码、标题/目录/正文选择器、排序属性、章节间隔全部写在配置里
-- 产出单文件深色主题 HTML 阅读页（带目录锚点，可离线阅读）
+- 离线 .txt 一键导入：`--novel-import 书.txt` 按「第X章」标题自动切分章节（utf-8/gbk 自适应），
+  不必联网抓取
+- 小说书架：`--novel-list` / Web UI「📖 小说书架」统一查看与管理阅读页
+- 产出单文件深色主题 HTML 阅读页：内置字号 / 行距 / 三档主题 / 目录抽屉 / 阅读进度条，
+  偏好与续读位置存 localStorage，全程离线可读
 
 ## 安装
 
@@ -80,6 +84,10 @@ python mediagrab.py --list-domains
 # 本地 Web UI
 python mediagrab.py --web          # 终端会打印带 token 的访问地址
 python mediagrab.py --web --no-auth   # 调试用：关闭鉴权
+
+# 小说：本机 txt 导入书架 / 查看书架
+python mediagrab.py --novel-import 书.txt 另一本.txt
+python mediagrab.py --novel-list
 ```
 
 常用参数：`--engine {auto,ffmpeg,native}`、`--proxy`、`--to-album`、`--album-mode {copy,move}`、
